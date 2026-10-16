@@ -230,6 +230,83 @@ final class OrganizerTests {
         expectEqual(result.records[0].state, .moved)
         expectTrue(Organizer.exists(root.appendingPathComponent("가을 프로젝트/memo.txt")))
     }
+    @Test func testAutomaticRulesMoveOnlyEligibleFilesAndUndo() async throws {
+        let root = try fixture()
+        for name in ["report.txt", "photo.png", "setup.dmg", "unknown.xyz", "partial.crdownload"] { try file(root, name) }
+        let recent = try file(root, "fresh.txt")
+        try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: recent.path)
+        let arranged = root.appendingPathComponent("문서")
+        try FileManager.default.createDirectory(at: arranged, withIntermediateDirectories: true)
+        try file(arranged, "already.txt")
+        var rules = AutomaticRule.defaults
+        rules[0].folderName = "업무 자료"
+        rules[1].folderName = "업무 자료"
+        rules[rules.firstIndex { $0.kind == .installer }!].enabled = false
+        let entries = try Catalog.scan(root)
+        let plans = try AutomaticOrganization.plans(for: entries, root: root, rules: rules)
+        expectEqual(Set(plans.map { $0.source.lastPathComponent }), ["report.txt", "photo.png"])
+        expectFalse(Organizer.exists(root.appendingPathComponent("업무 자료")))
+        let store = try organizer(root)
+        let batch = try await store.execute(plans)
+        expectEqual(batch.records.filter { $0.state == .moved }.count, 2)
+        for name in ["setup.dmg", "unknown.xyz", "partial.crdownload", "fresh.txt", "문서/already.txt"] {
+            expectTrue(Organizer.exists(root.appendingPathComponent(name)))
+        }
+        let reloaded = try organizer(root)
+        let history = await reloaded.history()
+        let rescanned = try Catalog.scan(root, organizedFolders: Organizer.managedFolderNames(in: history, root: root))
+        // After a rerun only the freshly written file can become eligible; moved files never do.
+        let rerun = try AutomaticOrganization.plans(for: rescanned, root: root, rules: rules)
+        expectFalse(rerun.contains { ["report.txt", "photo.png"].contains($0.source.lastPathComponent) })
+        let undone = try await reloaded.undo(batchID: batch.id)
+        expectEqual(undone.records.filter { $0.state == .undone }.count, 2)
+    }
+    @Test func testAutomaticRulesPersistenceAndFolderIsolation() throws {
+        let root = try fixture(); let other = try fixture()
+        let url = root.appendingPathComponent(".state/rules.json")
+        var store = AutomaticRuleStore()
+        var rules = AutomaticRule.defaults
+        rules[0].folderName = "내 문서"
+        rules[1].enabled = false
+        try store.save(rules, for: root, to: url)
+        let reloaded = try AutomaticRuleStore.load(from: url)
+        expectEqual(reloaded.rules(for: root), rules)
+        expectEqual(reloaded.rules(for: other), AutomaticRule.defaults)
+        expectFalse(Organizer.exists(root.appendingPathComponent("내 문서")))
+        try Data("broken".utf8).write(to: url)
+        expectThrows(try AutomaticRuleStore.load(from: url))
+    }
+    @Test func testAutomaticRulesInvalidDestinationsAndDisabledCategories() throws {
+        let root = try fixture(); let outside = try fixture()
+        try file(root, "report.txt"); try file(root, "photo.png")
+        let entries = try Catalog.scan(root)
+        var rules = AutomaticRule.defaults
+        rules[0].folderName = "../escape"
+        expectThrows(try AutomaticOrganization.plans(for: entries, root: root, rules: rules))
+        rules[0].enabled = false
+        expectEqual(try AutomaticOrganization.plans(for: entries, root: root, rules: rules).count, 1)
+        rules[0].enabled = true; rules[0].folderName = "linked"
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("linked"), withDestinationURL: outside)
+        expectThrows(try AutomaticOrganization.plans(for: entries, root: root, rules: rules))
+        expectThrows(try AutomaticOrganization.plans(for: entries, root: root, rules: [rules[0], rules[0]]))
+        for index in rules.indices { rules[index].enabled = false }
+        expectTrue(try AutomaticOrganization.plans(for: entries, root: root, rules: rules).isEmpty)
+        expectTrue(Organizer.exists(root.appendingPathComponent("report.txt")))
+    }
+    @Test func testAutomaticExistingDestinationCollision() async throws {
+        let root = try fixture()
+        let folder = root.appendingPathComponent("자료")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try file(root, "report.txt", "new")
+        let original = try file(folder, "report.txt", "original")
+        var rules = AutomaticRule.defaults; rules[0].folderName = "자료"
+        let plans = try AutomaticOrganization.plans(for: Catalog.scan(root), root: root, rules: rules)
+        expectEqual(plans[0].destination.lastPathComponent, "report (1).txt")
+        let batch = try await organizer(root).execute(plans)
+        expectEqual(batch.records[0].state, .moved)
+        expectEqual(try String(contentsOf: original, encoding: .utf8), "original")
+    }
+
 }
 
 private func expectEqual<T: Equatable>(_ a: T, _ b: T, sourceLocation: SourceLocation = #_sourceLocation) { #expect(a == b, sourceLocation: sourceLocation) }

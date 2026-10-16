@@ -41,6 +41,7 @@ struct MainView: View {
         .preferredColorScheme(.light)
         .sheet(isPresented: $model.showPlan) { PlanView(model: model) }
         .sheet(isPresented: $model.showHistory) { HistoryView(model: model) }
+        .sheet(isPresented: $model.showAutomaticSettings) { AutomaticSettingsView(model: model) }
         .alert("확인이 필요해요", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("확인") { model.error = nil }
         } message: { Text(model.error ?? "") }
@@ -63,6 +64,9 @@ struct MainView: View {
             Button { model.showHistory = true } label: {
                 Label("정리 기록", systemImage: "clock.arrow.circlepath").font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading).padding(10)
             }.buttonStyle(.plain)
+            Button { model.editAutomaticSettings() } label: {
+                Label("자동정리 설정", systemImage: "slider.horizontal.3").font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading).padding(10).contentShape(Rectangle())
+            }.buttonStyle(.plain).disabled(model.working || model.needsFolder)
             Spacer()
             VStack(alignment: .leading, spacing: 8) {
                 Label("내 맥 안에서만", systemImage: "lock.shield").font(.system(size: 11, weight: .medium)).foregroundStyle(teal)
@@ -119,15 +123,14 @@ struct MainView: View {
                     Text("\(model.entries.filter { $0.kind == .installer }.count)개를 한곳에서 확인해요").font(.system(size: 14, weight: .semibold))
                 }.padding(17).frame(maxWidth: .infinity, minHeight: 66, alignment: .leading).background(Color(red: 0.98, green: 0.94, blue: 0.86)).clipShape(RoundedRectangle(cornerRadius: 13))
             }.buttonStyle(.plain)
-            Button {
-                model.query = ""; model.period = 0; model.selectCategory(nil)
-                model.selection = Set(model.ready.map(\.id))
-            } label: {
+            Button { model.automaticOrganize() } label: {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack { Label("종류별 정리 제안", systemImage: "tray.2"); Spacer(); Image(systemName: "arrow.right") }.font(.system(size: 11, weight: .medium))
-                    Text("\(model.ready.count)개 선택하고 검토하기").font(.system(size: 14, weight: .semibold))
+                    HStack { Label("자동정리", systemImage: "sparkles"); Spacer(); Image(systemName: "arrow.right") }.font(.system(size: 13, weight: .semibold))
+                    Text("전체 폴더 · \(model.automaticCount)개 바로 정리").font(.system(size: 12, weight: .medium))
                 }.padding(17).frame(maxWidth: .infinity, minHeight: 66, alignment: .leading).background(teal.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 13))
-            }.buttonStyle(.plain).disabled(model.working || model.storageError != nil)
+                .contentShape(Rectangle())
+            }.buttonStyle(SidebarButtonStyle()).disabled(model.working || model.loading || model.storageError != nil || model.rulesStorageError != nil)
+                .help("검색·선택과 관계없이 전체 폴더의 파일을 설정한 분류별 폴더로 바로 옮겨요. 왼쪽 자동정리 설정에서 목적지를 바꿀 수 있어요.")
         }.padding(.horizontal, 28).padding(.bottom, 23)
     }
     private var searchBar: some View {
@@ -223,10 +226,14 @@ struct MainView: View {
                 HStack {
                     Image(systemName: "checkmark.circle").foregroundStyle(teal)
                     Text(message).font(.system(size: 11)).lineLimit(2)
+                    if let batch = model.undoBatch {
+                        Button("되돌리기") { model.undo(batch) }.controlSize(.small).disabled(model.working)
+                    }
                     Spacer(); Button { model.message = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain)
                 }.padding(.horizontal, 25).padding(.vertical, 10).background(teal.opacity(0.06))
             }
             if let storageError = model.storageError { Text(storageError).font(.system(size: 11)).foregroundStyle(.red).padding(10) }
+            if let rulesError = model.rulesStorageError { Text(rulesError).font(.system(size: 11)).foregroundStyle(.red).padding(10) }
             HStack(spacing: 12) {
                 if model.working {
                     ProgressView().controlSize(.small)
@@ -399,5 +406,46 @@ struct HistoryView: View {
             if model.working { ProgressView().controlSize(.small) }
             if let message = model.message { Text(message).font(.system(size: 11)).foregroundStyle(teal) }
         }.padding(28).frame(width: 720, height: 540).foregroundStyle(ink).tint(teal).preferredColorScheme(.light)
+    }
+}
+
+struct AutomaticSettingsView: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Label("자동정리 설정", systemImage: "sparkles").font(.system(size: 23, weight: .bold))
+            Text("자동정리를 누르면 켜 둔 분류의 파일을 아래 폴더로 바로 옮겨요.").font(.system(size: 12)).foregroundStyle(muted)
+            Text(model.root.path).font(.system(size: 11)).foregroundStyle(teal).lineLimit(2).textSelection(.enabled)
+            VStack(spacing: 14) {
+                ForEach(model.draftRules.indices, id: \.self) { index in
+                    HStack(spacing: 12) {
+                        Toggle(model.draftRules[index].kind.rawValue, isOn: $model.draftRules[index].enabled)
+                            .toggleStyle(.checkbox).frame(width: 100, alignment: .leading)
+                        Image(systemName: "arrow.right").foregroundStyle(muted)
+                        TextField("폴더 이름", text: $model.draftRules[index].folderName)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("\(model.draftRules[index].kind.rawValue) 목적지 폴더")
+                            .disabled(!model.draftRules[index].enabled)
+                        Menu("기존 폴더") {
+                            ForEach(model.existingFolderNames, id: \.self) { name in
+                                Button(name) { model.draftRules[index].folderName = name }
+                            }
+                        }.fixedSize().disabled(!model.draftRules[index].enabled || model.existingFolderNames.isEmpty)
+                    }
+                }
+            }.padding(18).background(canvas).clipShape(RoundedRectangle(cornerRadius: 12))
+            Text("새 이름을 입력하면 정리할 때 폴더를 만들어요. 검색·필터와 관계없이 전체 폴더를 정리하며, 기타·다운로드 중·이미 정리된 파일은 건너뛰어요.").font(.system(size: 11)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
+            if let error = model.automaticSettingsError {
+                Text(error).font(.system(size: 11)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("취소") { model.showAutomaticSettings = false }.keyboardShortcut(.cancelAction)
+                Button("기본값") { model.draftRules = AutomaticRule.defaults }
+                Spacer()
+                Button("설정 저장") { model.saveAutomaticSettings() }.buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction).disabled(model.automaticSettingsError != nil)
+            }
+        }.padding(28).frame(width: 620).foregroundStyle(ink).tint(teal).preferredColorScheme(.light)
+            .onChange(of: model.draftRules) { _ in model.validateAutomaticSettings() }
     }
 }

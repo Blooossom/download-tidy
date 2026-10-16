@@ -27,6 +27,14 @@ final class AppModel: ObservableObject {
     @Published var existingFolderNames: [String] = []
     @Published var showPlan = false
     @Published var showHistory = false
+    @Published var showAutomaticSettings = false
+    @Published var automaticRules = AutomaticRule.defaults
+    @Published var draftRules = AutomaticRule.defaults
+    @Published var automaticSettingsError: String?
+    @Published var rulesStorageError: String?
+    @Published var undoBatchID: UUID?
+    private var ruleStore = AutomaticRuleStore()
+    private let rulesURL: URL
     @Published var message: String?
     @Published var error: String?
     @Published var scanError: String?
@@ -47,6 +55,11 @@ final class AppModel: ObservableObject {
         self.root = root ?? UserDefaults.standard.url(forKey: "downloadTidyRoot") ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
         needsFolder = root == nil && UserDefaults.standard.url(forKey: "downloadTidyRoot") == nil
         journalURL = (storage ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("DownloadTidy")).appendingPathComponent("history.json")
+        rulesURL = journalURL.deletingLastPathComponent().appendingPathComponent("automatic-rules.json")
+        do {
+            ruleStore = try AutomaticRuleStore.load(from: rulesURL)
+            automaticRules = ruleStore.rules(for: self.root)
+        } catch { rulesStorageError = "자동정리 설정을 읽지 못했어요: \(error.localizedDescription)" }
         do { organizer = try Organizer(journalURL: journalURL) } catch { storageError = error.localizedDescription }
         Task {
             do { try await organizer?.recover() } catch { storageError = error.localizedDescription }
@@ -54,7 +67,7 @@ final class AppModel: ObservableObject {
             if !needsFolder { await refresh() }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            Task { @MainActor in guard let self, !self.working, !self.showPlan else { return }; await self.refresh(quiet: true) }
+            Task { @MainActor in guard let self, !self.working, !self.showPlan, !self.showAutomaticSettings else { return }; await self.refresh(quiet: true) }
         }
     }
     var filtered: [FileEntry] {
@@ -79,6 +92,10 @@ final class AppModel: ObservableObject {
     var selected: [FileEntry] { entries.filter { selection.contains($0.id) && $0.canMove } }
     var fileCount: Int { entries.filter { $0.kind != .folder }.count }
     var totalSize: Int64 { entries.filter { $0.kind != .folder }.reduce(0) { $0 + $1.size } }
+    var automaticCount: Int {
+        entries.filter { entry in entry.canOrganize && automaticRules.contains { $0.kind == entry.kind && $0.enabled } }.count
+    }
+    var undoBatch: MoveBatch? { history.first { $0.id == undoBatchID && $0.records.contains { $0.state == .moved } } }
     var reviewCount: Int { planEntries.count }
     func selectCategory(_ kind: FileKind?) {
         guard category != kind else { return }
@@ -127,6 +144,7 @@ final class AppModel: ObservableObject {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         scanID = UUID(); loading = false; needsFolder = false
         root = url.resolvingSymlinksInPath(); selection = []; focusID = nil; entries = []; query = ""; category = nil
+        automaticRules = ruleStore.rules(for: root)
         if !demo { UserDefaults.standard.set(root, forKey: "downloadTidyRoot") }
         Task { await refresh() }
     }
@@ -138,9 +156,7 @@ final class AppModel: ObservableObject {
         planEntries = selected
         guard !planEntries.isEmpty else { return }
         useCustomFolder = planEntries.contains { !$0.kind.canOrganize }; customFolderName = ""
-        existingFolderNames = entries.filter { $0.kind == .folder && !$0.organized }
-            .map(\.name).filter { (try? Organizer.destinationFolder(named: $0, root: root)) != nil }
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        loadFolderChoices()
         updatePlan()
         showPlan = true
     }
@@ -164,27 +180,88 @@ final class AppModel: ObservableObject {
             planError = error.localizedDescription
         }
     }
-    func organize() {
-        guard let organizer, !working, planError == nil, !plans.isEmpty else { return }
-        let review = plans
-        showPlan = false; working = true; canCancel = true
+    private func loadFolderChoices() {
+        existingFolderNames = entries.filter { $0.kind == .folder && !$0.organized }
+            .map(\.name).filter { (try? Organizer.destinationFolder(named: $0, root: root)) != nil }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+    func editAutomaticSettings() {
+        guard !working, !needsFolder else { return }
+        draftRules = automaticRules
+        loadFolderChoices()
+        validateAutomaticSettings()
+        showAutomaticSettings = true
+    }
+    func validateAutomaticSettings() {
+        do {
+            try AutomaticOrganization.validate(draftRules, root: root)
+            automaticSettingsError = rulesStorageError
+        } catch { automaticSettingsError = error.localizedDescription }
+    }
+    func saveAutomaticSettings() {
+        guard !working, rulesStorageError == nil else { return }
+        do {
+            try ruleStore.save(draftRules, for: root, to: rulesURL)
+            automaticRules = draftRules
+            showAutomaticSettings = false
+        } catch { automaticSettingsError = error.localizedDescription }
+    }
+    func automaticOrganize() {
+        guard organizer != nil, !working, !loading, !needsFolder, storageError == nil else { return }
+        guard rulesStorageError == nil else { error = rulesStorageError; return }
+        let target = root
+        let rules = automaticRules
+        let folders = Organizer.managedFolderNames(in: history, root: target)
+        working = true; canCancel = true; message = nil; undoBatchID = nil
         operationTask = Task {
             do {
-                let batch = try await organizer.execute(review)
-                let moved = batch.records.filter { $0.state == .moved }.count
-                let failed = batch.records.count - moved
-                message = "\(moved)개 파일을 정리했어요." + (failed > 0 ? " \(failed)개는 이동하지 않았어요. 기록에서 이유를 확인하세요." : " 정리 기록에서 되돌릴 수 있어요.")
-                if failed > 0 { showHistory = true }
-            } catch { self.error = error.localizedDescription }
-            history = await organizer.history()
-            selection = []; working = false; canCancel = false
+                let items = try await Task.detached { try Catalog.scan(target, organizedFolders: folders) }.value
+                try Task.checkCancellation()
+                let review = try AutomaticOrganization.plans(for: items, root: target, rules: rules)
+                let skipped = items.filter { !$0.organized && $0.kind != .folder }.count - review.count
+                if review.isEmpty {
+                    message = "자동정리할 파일이 없어요. \(skipped)개 제외 · 분류 설정과 파일 상태를 확인해 주세요."
+                } else {
+                    await execute(review, automaticSkipped: skipped)
+                }
+            } catch is CancellationError { message = "자동정리를 중단했어요." }
+            catch { self.error = error.localizedDescription }
+            working = false; canCancel = false
             await refresh()
         }
+    }
+    func organize() {
+        guard organizer != nil, !working, planError == nil, !plans.isEmpty else { return }
+        let review = plans
+        showPlan = false; working = true; canCancel = true; message = nil; undoBatchID = nil
+        operationTask = Task {
+            await execute(review)
+            working = false; canCancel = false
+            await refresh()
+        }
+    }
+    private func execute(_ review: [MovePlan], automaticSkipped: Int? = nil) async {
+        guard let organizer else { return }
+        do {
+            let batch = try await organizer.execute(review)
+            let moved = batch.records.filter { $0.state == .moved }.count
+            let failed = batch.records.count - moved
+            if let skipped = automaticSkipped {
+                message = "자동정리 \(moved)개 완료 · \(skipped + failed)개 제외" + (failed > 0 ? " · 이동하지 못한 이유는 정리 기록에서 확인하세요." : " · 정리한 파일은 되돌릴 수 있어요.")
+            } else {
+                message = "\(moved)개 파일을 정리했어요." + (failed > 0 ? " \(failed)개는 이동하지 않았어요. 기록에서 이유를 확인하세요." : " 정리 기록에서 되돌릴 수 있어요.")
+            }
+            undoBatchID = moved > 0 ? batch.id : nil
+            if failed > 0 { showHistory = true }
+        } catch is CancellationError { message = "정리를 중단했어요." }
+        catch { self.error = error.localizedDescription }
+        history = await organizer.history()
+        selection = []
     }
     func cancelOperation() { operationTask?.cancel() }
     func undo(_ batch: MoveBatch) {
         guard let organizer, !working else { return }
-        working = true
+        working = true; undoBatchID = nil
         Task {
             do {
                 let before = batch.records.filter { $0.state == .undone }.count

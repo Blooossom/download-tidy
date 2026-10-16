@@ -114,10 +114,15 @@ public actor Organizer {
         }.map { $0.plan.destination.deletingLastPathComponent().lastPathComponent })
     }
     private static func makePlans(for entries: [FileEntry], root: URL, folder customFolder: URL?) -> [MovePlan] {
+        makePlans(for: entries.filter { customFolder == nil ? $0.canOrganize : $0.canMove }, root: root) {
+            customFolder ?? root.appendingPathComponent($0.kind.rawValue, isDirectory: true)
+        }
+    }
+    static func makePlans(for entries: [FileEntry], root: URL, destinationFolder: (FileEntry) -> URL) -> [MovePlan] {
         var reserved = Set<String>()
-        return entries.filter { customFolder == nil ? $0.canOrganize : $0.canMove }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.compactMap { entry in
+        return entries.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.compactMap { entry in
             guard let fingerprint = entry.fingerprint else { return nil }
-            let folder = customFolder ?? root.appendingPathComponent(entry.kind.rawValue, isDirectory: true)
+            let folder = destinationFolder(entry)
             var destination = folder.appendingPathComponent(entry.name)
             var n = 1
             while exists(destination) || reserved.contains(destination.path) {
