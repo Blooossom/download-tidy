@@ -307,6 +307,113 @@ final class OrganizerTests {
         expectEqual(try String(contentsOf: original, encoding: .utf8), "original")
     }
 
+    @Test func testCustomRulePriorityFallbackAndUndo() async throws {
+        let root = try fixture()
+        for name in ["주간 보고_01.XLSX", "budget.xlsx", "memo.txt", "debug.log", "unknown.xyz", "주간 보고.part"] { try file(root, name) }
+        let custom = [
+            CustomAutomaticRule(pattern: "주간 보고", folderName: "보고서"),
+            CustomAutomaticRule(condition: .fileExtension, pattern: ".xlsx, XLS", folderName: "스프레드시트"),
+            CustomAutomaticRule(condition: .fileExtension, pattern: "log", folderName: "로그")
+        ]
+        let entries = try Catalog.scan(root)
+        let plans = try AutomaticOrganization.plans(for: entries, root: root, rules: AutomaticRule.defaults, customRules: custom)
+        let destinations = Dictionary(uniqueKeysWithValues: plans.map { ($0.source.lastPathComponent, $0.destination.deletingLastPathComponent().lastPathComponent) })
+        expectEqual(destinations["주간 보고_01.XLSX"], "보고서")
+        expectEqual(destinations["budget.xlsx"], "스프레드시트")
+        expectEqual(destinations["memo.txt"], "문서")
+        expectEqual(destinations["debug.log"], "로그")
+        expectEqual(plans.count, 4)
+        let store = try organizer(root)
+        let batch = try await store.execute(plans)
+        expectEqual(batch.records.filter { $0.state == .moved }.count, 4)
+        let undone = try await store.undo(batchID: batch.id)
+        expectEqual(undone.records.filter { $0.state == .undone }.count, 4)
+        var reordered = custom; reordered.swapAt(0, 1)
+        let weekly = entries.first { $0.name == "주간 보고_01.XLSX" }!
+        expectEqual(AutomaticOrganization.folderName(for: weekly, rules: [], customRules: reordered), "스프레드시트")
+        reordered[0].enabled = false
+        expectEqual(AutomaticOrganization.folderName(for: weekly, rules: [], customRules: reordered), "보고서")
+    }
+    @Test func testCustomMatchingAndInvalidRules() throws {
+        let root = try fixture()
+        try file(root, "주간 보고_FINAL.xlsx".decomposedStringWithCanonicalMapping)
+        let entry = try Catalog.scan(root)[0]
+        expectTrue(CustomAutomaticRule(pattern: "주간 보고_final", folderName: "보고").matches(entry))
+        expectFalse(CustomAutomaticRule(pattern: "주간보고", folderName: "보고").matches(entry))
+        expectFalse(CustomAutomaticRule(condition: .fileExtension, pattern: "xls", folderName: "엑셀").matches(entry))
+        for pattern in ["", " ", "*", "xlsx,", "../xlsx", "xlsx xls"] {
+            let rule = CustomAutomaticRule(condition: .fileExtension, pattern: pattern, folderName: "자료")
+            expectThrows(try AutomaticOrganization.validate(AutomaticRule.defaults, root: root, customRules: [rule]))
+        }
+        let bad = CustomAutomaticRule(pattern: "report", folderName: "../outside")
+        expectThrows(try AutomaticOrganization.validate(AutomaticRule.defaults, root: root, customRules: [bad]))
+        var disabled = bad; disabled.enabled = false
+        try AutomaticOrganization.validate(AutomaticRule.defaults, root: root, customRules: [disabled])
+    }
+    @Test func testLegacySettingsMigrationAndCustomPersistence() throws {
+        let root = try fixture(); let other = try fixture()
+        let url = root.appendingPathComponent("rules.json")
+        let legacy: [String: [String: [AutomaticRule]]] = ["folders": [root.standardizedFileURL.path: AutomaticRule.defaults]]
+        try JSONEncoder().encode(legacy).write(to: url)
+        var store = try AutomaticRuleStore.load(from: url)
+        expectTrue(store.customRules(for: root).isEmpty)
+        expectFalse(store.watchesDownloads(for: root))
+        let custom = [CustomAutomaticRule(pattern: "invoice", folderName: "Invoices"), CustomAutomaticRule(condition: .fileExtension, pattern: "pdf", folderName: "PDF")]
+        try store.save(AutomaticRule.defaults, for: root, to: url, customRules: custom, watchesDownloads: true)
+        store = try AutomaticRuleStore.load(from: url)
+        expectEqual(store.customRules(for: root), custom)
+        expectTrue(store.watchesDownloads(for: root))
+        expectTrue(store.customRules(for: other).isEmpty)
+        expectFalse(store.watchesDownloads(for: other))
+        try store.save(AutomaticRule.defaults, for: root, to: url)
+        expectEqual(try AutomaticRuleStore.load(from: url).customRules(for: root), custom)
+    }
+    @Test func testDownloadMonitorBaselineStabilityAndUndo() async throws {
+        let root = try fixture(); try file(root, "existing.txt")
+        var monitor = DownloadMonitor()
+        let rules = AutomaticRule.defaults
+        monitor.observe(try Catalog.scan(root))
+        expectTrue(monitor.candidates(in: try Catalog.scan(root), rules: rules, customRules: []).isEmpty)
+        let partial = try file(root, "new.txt.crdownload")
+        monitor.observe(try Catalog.scan(root))
+        expectTrue(monitor.candidates(in: try Catalog.scan(root), rules: rules, customRules: []).isEmpty)
+        let completed = root.appendingPathComponent("new.txt")
+        try FileManager.default.moveItem(at: partial, to: completed)
+        try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: completed.path)
+        monitor.observe(try Catalog.scan(root))
+        expectTrue(monitor.candidates(in: try Catalog.scan(root), rules: rules, customRules: []).isEmpty)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -10)], ofItemAtPath: completed.path)
+        let entries = try Catalog.scan(root); monitor.observe(entries)
+        let ids = monitor.candidates(in: entries, rules: rules, customRules: [])
+        expectEqual(ids, Set(entries.filter { $0.name == "new.txt" }.map(\.id)))
+        monitor.consume(ids)
+        let store = try organizer(root)
+        let batch = try await store.execute(AutomaticOrganization.plans(for: entries.filter { ids.contains($0.id) }, root: root, rules: rules))
+        monitor.observe(try Catalog.scan(root))
+        _ = try await store.undo(batchID: batch.id)
+        monitor.ignoreRestored(ids)
+        let restored = try Catalog.scan(root); monitor.observe(restored)
+        expectTrue(monitor.candidates(in: restored, rules: rules, customRules: []).isEmpty)
+        expectTrue(Organizer.exists(root.appendingPathComponent("existing.txt")))
+    }
+    @Test func testDownloadMonitorReplacementAndNoMatch() throws {
+        let root = try fixture(); let original = try file(root, "existing.txt")
+        var monitor = DownloadMonitor(); monitor.observe(try Catalog.scan(root))
+        try Data("edited".utf8).write(to: original)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -10)], ofItemAtPath: original.path)
+        var entries = try Catalog.scan(root); monitor.observe(entries)
+        expectTrue(monitor.candidates(in: entries, rules: AutomaticRule.defaults, customRules: []).isEmpty)
+        try FileManager.default.moveItem(at: original, to: root.appendingPathComponent(".old"))
+        try file(root, "existing.txt")
+        try file(root, "new.log")
+        entries = try Catalog.scan(root); monitor.observe(entries)
+        expectEqual(monitor.candidates(in: entries, rules: AutomaticRule.defaults, customRules: []), Set(entries.filter { $0.name == "existing.txt" }.map(\.id)))
+        let rule = CustomAutomaticRule(condition: .fileExtension, pattern: "log", folderName: "Logs")
+        expectEqual(monitor.candidates(in: entries, rules: AutomaticRule.defaults, customRules: [rule]), Set(entries.map(\.id)))
+        var freshSession = DownloadMonitor(); freshSession.observe(entries)
+        expectTrue(freshSession.candidates(in: entries, rules: AutomaticRule.defaults, customRules: [rule]).isEmpty)
+    }
+
 }
 
 private func expectEqual<T: Equatable>(_ a: T, _ b: T, sourceLocation: SourceLocation = #_sourceLocation) { #expect(a == b, sourceLocation: sourceLocation) }

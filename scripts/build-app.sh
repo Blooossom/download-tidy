@@ -20,8 +20,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>DownloadTidy</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.3.0</string>
-<key>CFBundleVersion</key><string>3</string>
+<key>CFBundleShortVersionString</key><string>0.4.0</string>
+<key>CFBundleVersion</key><string>4</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSDownloadsFolderUsageDescription</key><string>다운로드 파일을 분류하고 검색하며, 선택한 파일을 정리하기 위해 접근합니다.</string>

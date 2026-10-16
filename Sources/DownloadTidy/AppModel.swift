@@ -30,6 +30,12 @@ final class AppModel: ObservableObject {
     @Published var showAutomaticSettings = false
     @Published var automaticRules = AutomaticRule.defaults
     @Published var draftRules = AutomaticRule.defaults
+    @Published var customRules: [CustomAutomaticRule] = []
+    @Published var draftCustomRules: [CustomAutomaticRule] = []
+    @Published var settingsTab = 0
+    @Published var watchesDownloads = false
+    @Published var draftWatchesDownloads = false
+    private var downloadMonitor = DownloadMonitor()
     @Published var automaticSettingsError: String?
     @Published var rulesStorageError: String?
     @Published var undoBatchID: UUID?
@@ -59,6 +65,8 @@ final class AppModel: ObservableObject {
         do {
             ruleStore = try AutomaticRuleStore.load(from: rulesURL)
             automaticRules = ruleStore.rules(for: self.root)
+            customRules = ruleStore.customRules(for: self.root)
+            watchesDownloads = ruleStore.watchesDownloads(for: self.root)
         } catch { rulesStorageError = "자동정리 설정을 읽지 못했어요: \(error.localizedDescription)" }
         do { organizer = try Organizer(journalURL: journalURL) } catch { storageError = error.localizedDescription }
         Task {
@@ -93,7 +101,7 @@ final class AppModel: ObservableObject {
     var fileCount: Int { entries.filter { $0.kind != .folder }.count }
     var totalSize: Int64 { entries.filter { $0.kind != .folder }.reduce(0) { $0 + $1.size } }
     var automaticCount: Int {
-        entries.filter { entry in entry.canOrganize && automaticRules.contains { $0.kind == entry.kind && $0.enabled } }.count
+        entries.filter { AutomaticOrganization.folderName(for: $0, rules: automaticRules, customRules: customRules) != nil }.count
     }
     var undoBatch: MoveBatch? { history.first { $0.id == undoBatchID && $0.records.contains { $0.state == .moved } } }
     var reviewCount: Int { planEntries.count }
@@ -115,6 +123,7 @@ final class AppModel: ObservableObject {
         case .success(let items):
             let changed = items.count != entries.count || zip(items, entries).contains { $0.id != $1.id || $0.fingerprint != $1.fingerprint || $0.exclusion != $1.exclusion }
             entries = items; scanError = nil
+            if watchesDownloads { downloadMonitor.observe(items) }
             selection.formIntersection(Set(items.filter(\.canMove).map(\.id)))
             if let focusID, !items.contains(where: { $0.id == focusID }) { self.focusID = nil }
             if changed || !quiet { search() }
@@ -122,6 +131,13 @@ final class AppModel: ObservableObject {
             entries = []; selection = []; focusID = nil; scanError = failure.localizedDescription
         }
         loading = false
+        if watchesDownloads, scanError == nil, !showPlan, !showAutomaticSettings, storageError == nil, rulesStorageError == nil {
+            let candidates = downloadMonitor.candidates(in: entries, rules: automaticRules, customRules: customRules)
+            if !candidates.isEmpty {
+                downloadMonitor.consume(candidates)
+                automaticOrganize(only: candidates)
+            }
+        }
     }
     func search() {
         searchTask?.cancel(); contentMatches = []
@@ -145,6 +161,9 @@ final class AppModel: ObservableObject {
         scanID = UUID(); loading = false; needsFolder = false
         root = url.resolvingSymlinksInPath(); selection = []; focusID = nil; entries = []; query = ""; category = nil
         automaticRules = ruleStore.rules(for: root)
+        customRules = ruleStore.customRules(for: root)
+        watchesDownloads = ruleStore.watchesDownloads(for: root)
+        downloadMonitor = DownloadMonitor()
         if !demo { UserDefaults.standard.set(root, forKey: "downloadTidyRoot") }
         Task { await refresh() }
     }
@@ -188,37 +207,56 @@ final class AppModel: ObservableObject {
     func editAutomaticSettings() {
         guard !working, !needsFolder else { return }
         draftRules = automaticRules
+        draftCustomRules = customRules
+        draftWatchesDownloads = watchesDownloads
         loadFolderChoices()
         validateAutomaticSettings()
         showAutomaticSettings = true
     }
+    func moveCustomRule(_ id: UUID, by offset: Int) {
+        guard let index = draftCustomRules.firstIndex(where: { $0.id == id }),
+              draftCustomRules.indices.contains(index + offset) else { return }
+        draftCustomRules.swapAt(index, index + offset)
+    }
+    var draftAutomaticPreview: [(entry: FileEntry, folder: String)] {
+        entries.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.compactMap { entry in
+            guard let folder = AutomaticOrganization.folderName(for: entry, rules: draftRules, customRules: draftCustomRules) else { return nil }
+            return (entry, folder)
+        }
+    }
     func validateAutomaticSettings() {
         do {
-            try AutomaticOrganization.validate(draftRules, root: root)
+            try AutomaticOrganization.validate(draftRules, root: root, customRules: draftCustomRules)
             automaticSettingsError = rulesStorageError
         } catch { automaticSettingsError = error.localizedDescription }
     }
     func saveAutomaticSettings() {
         guard !working, rulesStorageError == nil else { return }
         do {
-            try ruleStore.save(draftRules, for: root, to: rulesURL)
+            try ruleStore.save(draftRules, for: root, to: rulesURL, customRules: draftCustomRules, watchesDownloads: draftWatchesDownloads)
             automaticRules = draftRules
+            customRules = draftCustomRules
+            if watchesDownloads != draftWatchesDownloads { downloadMonitor = DownloadMonitor() }
+            watchesDownloads = draftWatchesDownloads
             showAutomaticSettings = false
+            Task { await refresh() }
         } catch { automaticSettingsError = error.localizedDescription }
     }
-    func automaticOrganize() {
+    func automaticOrganize(only ids: Set<String>? = nil) {
         guard organizer != nil, !working, !loading, !needsFolder, storageError == nil else { return }
         guard rulesStorageError == nil else { error = rulesStorageError; return }
         let target = root
         let rules = automaticRules
+        let custom = customRules
         let folders = Organizer.managedFolderNames(in: history, root: target)
         working = true; canCancel = true; message = nil; undoBatchID = nil
         operationTask = Task {
             do {
                 let items = try await Task.detached { try Catalog.scan(target, organizedFolders: folders) }.value
                 try Task.checkCancellation()
-                let review = try AutomaticOrganization.plans(for: items, root: target, rules: rules)
-                let skipped = items.filter { !$0.organized && $0.kind != .folder }.count - review.count
+                let targets = ids.map { selectedIDs in items.filter { selectedIDs.contains($0.id) } } ?? items
+                let review = try AutomaticOrganization.plans(for: targets, root: target, rules: rules, customRules: custom)
+                let skipped = targets.filter { !$0.organized && $0.kind != .folder }.count - review.count
                 if review.isEmpty {
                     message = "자동정리할 파일이 없어요. \(skipped)개 제외 · 분류 설정과 파일 상태를 확인해 주세요."
                 } else {
@@ -266,6 +304,7 @@ final class AppModel: ObservableObject {
             do {
                 let before = batch.records.filter { $0.state == .undone }.count
                 let result = try await organizer.undo(batchID: batch.id)
+                downloadMonitor.ignoreRestored(Set(result.records.filter { $0.state == .undone }.map { $0.plan.source.path }))
                 let count = result.records.filter { $0.state == .undone }.count - before
                 message = "\(count)개 파일을 원래 위치로 되돌렸어요."
             } catch { self.error = error.localizedDescription }

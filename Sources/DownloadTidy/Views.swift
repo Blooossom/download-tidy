@@ -55,7 +55,7 @@ struct MainView: View {
                 Text("줍줍").font(.system(size: 21, weight: .bold, design: .rounded))
             }.padding(.top, 32).padding(.bottom, 6)
             Text("파일마다, 제자리를.").font(.system(size: 11)).foregroundStyle(muted).padding(.leading, 33)
-            Text("내 다운로드").font(.system(size: 10, weight: .semibold)).foregroundStyle(muted).padding(.top, 36).padding(.bottom, 12)
+            Text(model.watchesDownloads ? "내 다운로드 · 자동 감지 ON" : "내 다운로드").font(.system(size: 10, weight: .semibold)).foregroundStyle(muted).padding(.top, 36).padding(.bottom, 12)
             sideRow("모든 파일", symbol: "square.grid.2x2", kind: nil, count: model.entries.count)
             ForEach(FileKind.allCases, id: \.self) { kind in
                 sideRow(kind.rawValue, symbol: kind.symbol, kind: kind, count: model.entries.filter { $0.kind == kind }.count)
@@ -130,7 +130,7 @@ struct MainView: View {
                 }.padding(17).frame(maxWidth: .infinity, minHeight: 66, alignment: .leading).background(teal.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 13))
                 .contentShape(Rectangle())
             }.buttonStyle(SidebarButtonStyle()).disabled(model.working || model.loading || model.storageError != nil || model.rulesStorageError != nil)
-                .help("검색·선택과 관계없이 전체 폴더의 파일을 설정한 분류별 폴더로 바로 옮겨요. 왼쪽 자동정리 설정에서 목적지를 바꿀 수 있어요.")
+                .help("검색·선택과 관계없이 전체 폴더의 파일을 커스텀 규칙과 기본 분류에 따라 바로 옮겨요. 왼쪽 자동정리 설정에서 목적지를 바꿀 수 있어요.")
         }.padding(.horizontal, 28).padding(.bottom, 23)
     }
     private var searchBar: some View {
@@ -412,40 +412,118 @@ struct HistoryView: View {
 struct AutomaticSettingsView: View {
     @ObservedObject var model: AppModel
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 14) {
             Label("자동정리 설정", systemImage: "sparkles").font(.system(size: 23, weight: .bold))
-            Text("자동정리를 누르면 켜 둔 분류의 파일을 아래 폴더로 바로 옮겨요.").font(.system(size: 12)).foregroundStyle(muted)
-            Text(model.root.path).font(.system(size: 11)).foregroundStyle(teal).lineLimit(2).textSelection(.enabled)
-            VStack(spacing: 14) {
-                ForEach(model.draftRules.indices, id: \.self) { index in
-                    HStack(spacing: 12) {
-                        Toggle(model.draftRules[index].kind.rawValue, isOn: $model.draftRules[index].enabled)
-                            .toggleStyle(.checkbox).frame(width: 100, alignment: .leading)
-                        Image(systemName: "arrow.right").foregroundStyle(muted)
-                        TextField("폴더 이름", text: $model.draftRules[index].folderName)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("\(model.draftRules[index].kind.rawValue) 목적지 폴더")
-                            .disabled(!model.draftRules[index].enabled)
-                        Menu("기존 폴더") {
-                            ForEach(model.existingFolderNames, id: \.self) { name in
-                                Button(name) { model.draftRules[index].folderName = name }
-                            }
-                        }.fixedSize().disabled(!model.draftRules[index].enabled || model.existingFolderNames.isEmpty)
-                    }
-                }
-            }.padding(18).background(canvas).clipShape(RoundedRectangle(cornerRadius: 12))
-            Text("새 이름을 입력하면 정리할 때 폴더를 만들어요. 검색·필터와 관계없이 전체 폴더를 정리하며, 기타·다운로드 중·이미 정리된 파일은 건너뛰어요.").font(.system(size: 11)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
+            Text(model.root.path).font(.system(size: 11)).foregroundStyle(teal).lineLimit(1).textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("새 다운로드 자동정리", isOn: $model.draftWatchesDownloads).toggleStyle(.switch)
+                Text("ON이면 앱 실행 중 약 15초마다 새 파일을 확인해요. 켜기 전 파일은 버튼으로 정리하고, 다운로드 중인 파일은 완료 후 옮겨요.").font(.system(size: 11)).foregroundStyle(muted)
+            }.padding(12).background(canvas).clipShape(RoundedRectangle(cornerRadius: 10))
+            Picker("설정 종류", selection: $model.settingsTab) {
+                Text("커스텀 규칙").tag(0)
+                Text("기본 분류").tag(1)
+                Text("적용 미리보기").tag(2)
+            }.pickerStyle(.segmented)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if model.settingsTab == 0 { customRules }
+                    else if model.settingsTab == 1 { categoryRules }
+                    else { preview }
+                }.padding(2)
+            }.frame(maxHeight: .infinity)
             if let error = model.automaticSettingsError {
-                Text(error).font(.system(size: 11)).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                Text(error).font(.system(size: 11)).foregroundStyle(.red).lineLimit(3)
             }
             HStack {
                 Button("취소") { model.showAutomaticSettings = false }.keyboardShortcut(.cancelAction)
-                Button("기본값") { model.draftRules = AutomaticRule.defaults }
                 Spacer()
+                Text("새 폴더는 이동할 때 만들어요.").font(.system(size: 11)).foregroundStyle(muted)
                 Button("설정 저장") { model.saveAutomaticSettings() }.buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction).disabled(model.automaticSettingsError != nil)
             }
-        }.padding(28).frame(width: 620).foregroundStyle(ink).tint(teal).preferredColorScheme(.light)
+        }.padding(24).frame(width: 740, height: 630).foregroundStyle(ink).tint(teal).preferredColorScheme(.light)
             .onChange(of: model.draftRules) { _ in model.validateAutomaticSettings() }
+            .onChange(of: model.draftCustomRules) { _ in model.validateAutomaticSettings() }
+    }
+    private var customRules: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("위에서부터 처음 맞는 규칙을 적용해요. 맞는 규칙이 없으면 기본 분류를 사용해요.").font(.system(size: 12)).foregroundStyle(muted)
+            Text("파일명은 대소문자를 구분하지 않고 띄어쓰기는 구분해요. 확장자는 쉼표로 여러 개를 입력할 수 있어요.").font(.system(size: 11)).foregroundStyle(muted)
+            ForEach($model.draftCustomRules) { $rule in
+                CustomRuleRow(rule: $rule, model: model)
+            }
+            Button { model.draftCustomRules.append(CustomAutomaticRule()) } label: {
+                Label("규칙 추가", systemImage: "plus")
+            }.buttonStyle(.bordered)
+            if model.draftCustomRules.isEmpty {
+                Text("아직 규칙이 없어요. 원하는 조건과 목적지 폴더를 추가해 보세요.").font(.system(size: 12)).foregroundStyle(muted).padding(.vertical, 20)
+            }
+        }
+    }
+    private var categoryRules: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("커스텀 규칙에 맞지 않는 파일에 적용해요. 분류를 꺼도 커스텀 규칙에 맞으면 이동해요.").font(.system(size: 12)).foregroundStyle(muted)
+            ForEach(model.draftRules.indices, id: \.self) { index in
+                HStack(spacing: 12) {
+                    Toggle(model.draftRules[index].kind.rawValue, isOn: $model.draftRules[index].enabled)
+                        .toggleStyle(.checkbox).frame(width: 100, alignment: .leading)
+                    Image(systemName: "arrow.right").foregroundStyle(muted)
+                    TextField("폴더 이름", text: $model.draftRules[index].folderName).textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("\(model.draftRules[index].kind.rawValue) 목적지 폴더").disabled(!model.draftRules[index].enabled)
+                    Menu("기존 폴더") {
+                        ForEach(model.existingFolderNames, id: \.self) { name in Button(name) { model.draftRules[index].folderName = name } }
+                    }.fixedSize().disabled(!model.draftRules[index].enabled || model.existingFolderNames.isEmpty)
+                }
+            }
+            Button("기본 분류 초기화") { model.draftRules = AutomaticRule.defaults }
+            Text("기타 파일은 커스텀 규칙에 맞을 때만 이동해요. 새 목적지 폴더는 실제 정리할 때 만들어요.").font(.system(size: 11)).foregroundStyle(muted)
+        }.padding(14).background(canvas).clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+    private var preview: some View {
+        let matches = model.draftAutomaticPreview
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("현재 목록 기준 · 전체 폴더의 \(matches.count)개 파일").font(.system(size: 13, weight: .semibold))
+            Text("자동정리 버튼을 누를 때의 예상 결과예요. 새 다운로드 감지는 켠 뒤 들어오는 파일에만 적용해요.").font(.system(size: 11)).foregroundStyle(muted)
+            if model.automaticSettingsError == nil {
+                ForEach(matches, id: \.entry.id) { item in
+                    HStack { Text(item.entry.name).lineLimit(1); Spacer(); Label(item.folder, systemImage: "arrow.right").foregroundStyle(teal).lineLimit(1) }
+                        .font(.system(size: 12)).padding(10).background(canvas).clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                if matches.isEmpty { Text("현재 적용할 파일이 없어요.").foregroundStyle(muted).padding(.vertical) }
+            } else { Text("입력 오류를 수정하면 목적지를 확인할 수 있어요.").foregroundStyle(muted) }
+        }
+    }
+}
+
+private struct CustomRuleRow: View {
+    @Binding var rule: CustomAutomaticRule
+    @ObservedObject var model: AppModel
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Toggle("규칙 사용", isOn: $rule.enabled).toggleStyle(.checkbox)
+                Spacer()
+                Button { model.moveCustomRule(rule.id, by: -1) } label: { Image(systemName: "arrow.up") }
+                    .accessibilityLabel("규칙 우선순위 올리기").disabled(model.draftCustomRules.first?.id == rule.id)
+                Button { model.moveCustomRule(rule.id, by: 1) } label: { Image(systemName: "arrow.down") }
+                    .accessibilityLabel("규칙 우선순위 내리기").disabled(model.draftCustomRules.last?.id == rule.id)
+                Button { let id = rule.id; model.draftCustomRules.removeAll { $0.id == id } } label: { Image(systemName: "trash") }
+                    .accessibilityLabel("규칙 삭제")
+            }.font(.system(size: 11))
+            HStack {
+                Picker("조건", selection: $rule.condition) {
+                    ForEach(CustomRuleCondition.allCases, id: \.self) { Text($0.label).tag($0) }
+                }.labelsHidden().frame(width: 145)
+                TextField(rule.condition == .filenameContains ? "포함할 단어 입력" : "확장자 입력 (쉼표로 구분)", text: $rule.pattern)
+                    .textFieldStyle(.roundedBorder).accessibilityLabel("규칙 조건 값")
+            }.disabled(!rule.enabled)
+            HStack {
+                Label("목적지", systemImage: "arrow.turn.down.right").frame(width: 140, alignment: .leading)
+                TextField("새 폴더 이름", text: $rule.folderName).textFieldStyle(.roundedBorder).accessibilityLabel("규칙 목적지 폴더")
+                Menu("기존 폴더") {
+                    ForEach(model.existingFolderNames, id: \.self) { name in Button(name) { rule.folderName = name } }
+                }.fixedSize().disabled(model.existingFolderNames.isEmpty)
+            }.disabled(!rule.enabled)
+        }.padding(14).background(canvas).clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }
