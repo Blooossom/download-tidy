@@ -79,10 +79,45 @@ public actor Organizer {
         return lstat(url.path, &info) == 0
     }
     public static func plans(for entries: [FileEntry], root: URL) -> [MovePlan] {
+        makePlans(for: entries, root: root, folder: nil)
+    }
+    public static func plans(for entries: [FileEntry], root: URL, folderName: String) throws -> [MovePlan] {
+        let folder = try destinationFolder(named: folderName, root: root)
+        return makePlans(for: entries, root: root, folder: folder)
+    }
+    /// A destination is always one real directory directly inside the selected root.
+    /// Resolving and validating it never creates it.
+    public static func destinationFolder(named rawName: String, root: URL) throws -> URL {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines).precomposedStringWithCanonicalMapping
+        guard !name.isEmpty else { throw TidyError.message("폴더 이름을 입력해 주세요.") }
+        guard !name.hasPrefix("."), !name.contains("/"), !name.contains(":"), !name.contains("\\"),
+              !name.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              name.utf8.count <= 255 else {
+            throw TidyError.message("폴더 이름은 점으로 시작할 수 없고, / · : · \\ 또는 줄바꿈을 넣을 수 없어요. 255바이트 이내로 입력해 주세요.")
+        }
+        let folder = root.appendingPathComponent(name, isDirectory: true)
+        guard !["app", "bundle", "framework", "pkg"].contains(folder.pathExtension.lowercased()) else {
+            throw TidyError.message("앱이나 패키지 이름 대신 일반 폴더 이름을 사용해 주세요.")
+        }
+        try checkDirectory(root)
+        if exists(folder) {
+            try checkDirectory(folder)
+            let values = try folder.resourceValues(forKeys: [.isPackageKey, .isAliasFileKey])
+            guard values.isPackage != true, values.isAliasFile != true else { throw TidyError.message("앱·패키지·별칭 안에는 정리할 수 없어요.") }
+        }
+        return folder
+    }
+    public static func managedFolderNames(in history: [MoveBatch], root: URL) -> Set<String> {
+        Set(history.flatMap(\.records).filter { record in
+            record.state != .failed && record.plan.root.standardizedFileURL.path == root.standardizedFileURL.path &&
+            record.plan.destination.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path == root.standardizedFileURL.path
+        }.map { $0.plan.destination.deletingLastPathComponent().lastPathComponent })
+    }
+    private static func makePlans(for entries: [FileEntry], root: URL, folder customFolder: URL?) -> [MovePlan] {
         var reserved = Set<String>()
-        return entries.filter(\.canOrganize).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.compactMap { entry in
+        return entries.filter { customFolder == nil ? $0.canOrganize : $0.canMove }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }.compactMap { entry in
             guard let fingerprint = entry.fingerprint else { return nil }
-            let folder = root.appendingPathComponent(entry.kind.rawValue, isDirectory: true)
+            let folder = customFolder ?? root.appendingPathComponent(entry.kind.rawValue, isDirectory: true)
             var destination = folder.appendingPathComponent(entry.name)
             var n = 1
             while exists(destination) || reserved.contains(destination.path) {
@@ -96,22 +131,23 @@ public actor Organizer {
         }
     }
     private func validate(_ plan: MovePlan) throws {
-        let root = plan.root.standardizedFileURL
-        guard plan.source.deletingLastPathComponent().standardizedFileURL == root,
-              plan.destination.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL == root,
-              FileKind.allCases.contains(where: { $0.canOrganize && $0.rawValue == plan.destination.deletingLastPathComponent().lastPathComponent }),
+        let root = plan.root
+        guard plan.source.deletingLastPathComponent().standardizedFileURL.path == root.standardizedFileURL.path,
+              plan.destination.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path == root.standardizedFileURL.path,
               !FileKind.isTemporary(plan.source) else { throw TidyError.message("허용된 정리 경로가 아닙니다.") }
-        try Self.checkDirectory(root)
+        let directory = plan.destination.deletingLastPathComponent()
+        let checkedFolder = try Self.destinationFolder(named: directory.lastPathComponent, root: root)
+        // The parent was checked above. Compare names here: Foundation may normalize
+        // /private/tmp differently depending on whether the child exists yet.
+        guard checkedFolder.lastPathComponent == directory.lastPathComponent else { throw TidyError.message("폴더 경로를 다시 확인해 주세요.") }
         guard try Fingerprint.read(plan.source) == plan.fingerprint else { throw TidyError.message("미리보기 이후 파일이 변경되었습니다. 다시 확인해 주세요.") }
         guard Date().timeIntervalSince(plan.fingerprint.modified) >= 3 else { throw TidyError.message("최근 변경 중인 파일입니다. 잠시 후 다시 시도하세요.") }
         guard !Self.exists(plan.destination) else { throw TidyError.message("이동할 위치에 같은 이름의 파일이 생겼습니다. 다시 미리보기해 주세요.") }
-        let directory = plan.destination.deletingLastPathComponent()
-        if Self.exists(directory) { try Self.checkDirectory(directory) }
     }
     private static func checkDirectory(_ url: URL) throws {
         var info = stat()
         guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
-              url.standardizedFileURL == url.resolvingSymlinksInPath().standardizedFileURL else {
+              url.standardizedFileURL.path == url.resolvingSymlinksInPath().standardizedFileURL.path else {
             throw TidyError.message("폴더에 접근할 수 없거나 링크로 연결된 폴더입니다.")
         }
     }

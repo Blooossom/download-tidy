@@ -154,6 +154,82 @@ final class OrganizerTests {
         let entries = try Catalog.scan(root)
         expectTrue(Organizer.plans(for: entries, root: root).isEmpty)
     }
+    @Test func testCustomFolderPreviewMoveSearchAndUndoAfterRestart() async throws {
+        let root = try fixture()
+        try file(root, "budget.txt", "custom folder search token")
+        try file(root, "photo.png")
+        try file(root, "unknown.xyz")
+        let plans = try Organizer.plans(for: Catalog.scan(root), root: root, folderName: "  10월 프로젝트  ")
+        let folder = root.appendingPathComponent("10월 프로젝트")
+        expectEqual(plans.count, 3)
+        expectTrue(plans.allSatisfy { $0.destination.deletingLastPathComponent().path == folder.path })
+        expectFalse(Organizer.exists(folder))
+        let result = try await organizer(root).execute(plans)
+        expectTrue(result.records.allSatisfy { $0.state == .moved })
+        let restarted = try organizer(root)
+        let history = await restarted.history()
+        let names = Organizer.managedFolderNames(in: history, root: root)
+        expectEqual(names, Set(["10월 프로젝트"]))
+        expectTrue(Organizer.managedFolderNames(in: history, root: try fixture()).isEmpty)
+        let entries = try Catalog.scan(root, organizedFolders: names)
+        expectEqual(entries.filter(\.organized).count, 3)
+        expectFalse(entries.filter(\.organized).contains { $0.canOrganize })
+        let matches = await ContentIndex().search("search token", in: entries)
+        expectEqual(matches.count, 1)
+        let restored = try await restarted.undo(batchID: result.id)
+        expectTrue(restored.records.allSatisfy { $0.state == .undone })
+        expectTrue(Organizer.exists(root.appendingPathComponent("budget.txt")))
+        expectTrue(Organizer.exists(root.appendingPathComponent("photo.png")))
+        expectTrue(Organizer.exists(root.appendingPathComponent("unknown.xyz")))
+    }
+    @Test func testCustomExistingFolderPreservesNameCollision() async throws {
+        let root = try fixture()
+        try file(root, "report.txt", "incoming")
+        let folder = root.appendingPathComponent("내 자료")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let existing = try file(folder, "report.txt", "keep me")
+        let plans = try Organizer.plans(for: Catalog.scan(root), root: root, folderName: "내 자료")
+        expectEqual(plans[0].destination.lastPathComponent, "report (1).txt")
+        let result = try await organizer(root).execute(plans)
+        expectEqual(result.records[0].state, .moved)
+        expectEqual(try String(contentsOf: existing, encoding: .utf8), "keep me")
+    }
+    @Test func testInvalidCustomNamesCannotCreateOrEscapeFolders() throws {
+        let root = try fixture()
+        try file(root, "report.txt")
+        let entries = try Catalog.scan(root)
+        for name in ["", "  ", ".", "..", "../outside", "nested/folder", "/tmp/escape", ".hidden", "a:b", "a\\b", "a\nb", "a\u{0}b", "Test.app", String(repeating: "가", count: 100)] {
+            expectThrows(try Organizer.plans(for: entries, root: root, folderName: name))
+        }
+        expectEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["report.txt"])
+    }
+    @Test func testCustomFolderRejectsFilesAndLinks() throws {
+        let root = try fixture(); let outside = try fixture()
+        try file(root, "occupied")
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("linked"), withDestinationURL: outside)
+        expectThrows(try Organizer.destinationFolder(named: "occupied", root: root))
+        expectThrows(try Organizer.destinationFolder(named: "linked", root: root))
+    }
+    @Test func testCustomDestinationChangedToLinkAfterPreviewIsSkipped() async throws {
+        let root = try fixture(); let outside = try fixture()
+        let source = try file(root, "report.txt")
+        let plans = try Organizer.plans(for: Catalog.scan(root), root: root, folderName: "project")
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("project"), withDestinationURL: outside)
+        let result = try await organizer(root).execute(plans)
+        expectEqual(result.records[0].state, .failed)
+        expectTrue(Organizer.exists(source))
+        expectTrue(try FileManager.default.contentsOfDirectory(atPath: outside.path).isEmpty)
+    }
+    @Test func testCustomFolderUnderPrivateTmpBeforeDirectoryExists() async throws {
+        let root = URL(fileURLWithPath: "/private/tmp/jupjup-regression-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        cleanup.append(root)
+        try file(root, "memo.txt")
+        let plans = try Organizer.plans(for: Catalog.scan(root), root: root, folderName: "가을 프로젝트")
+        let result = try await organizer(root).execute(plans)
+        expectEqual(result.records[0].state, .moved)
+        expectTrue(Organizer.exists(root.appendingPathComponent("가을 프로젝트/memo.txt")))
+    }
 }
 
 private func expectEqual<T: Equatable>(_ a: T, _ b: T, sourceLocation: SourceLocation = #_sourceLocation) { #expect(a == b, sourceLocation: sourceLocation) }

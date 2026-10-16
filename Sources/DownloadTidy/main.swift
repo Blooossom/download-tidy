@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if let i = args.firstIndex(of: "--demo"), args.count > i + 1 { demoRoot = URL(fileURLWithPath: args[i + 1]) }
         model = AppModel(root: demoRoot, storage: demoRoot?.appendingPathComponent(".tidy-test-state"))
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1190, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = demoRoot == nil ? "다운정리" : "다운정리 · 테스트 폴더"
+        window.title = demoRoot == nil ? "줍줍" : "줍줍 · 테스트 폴더"
         window.minSize = NSSize(width: 1020, height: 720)
         window.contentView = NSHostingView(rootView: MainView(model: model))
         window.delegate = self
@@ -29,7 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let menu = NSMenu()
         let app = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "다운정리 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "줍줍 종료", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         app.submenu = appMenu; menu.addItem(app)
         let edit = NSMenuItem(title: "편집", action: nil, keyEquivalent: "")
         let editMenu = NSMenu(title: "편집")
@@ -39,12 +39,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         edit.submenu = editMenu; menu.addItem(edit)
         NSApp.mainMenu = menu
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "tray.and.arrow.down", accessibilityDescription: "다운정리")
+        statusItem.button?.image = NSImage(systemSymbolName: "tray.and.arrow.down", accessibilityDescription: "줍줍")
         let statusMenu = NSMenu(); statusMenu.delegate = self; statusItem.menu = statusMenu
     }
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let show = menu.addItem(withTitle: "다운정리 열기", action: #selector(showMain), keyEquivalent: "")
+        let show = menu.addItem(withTitle: "줍줍 열기", action: #selector(showMain), keyEquivalent: "")
         show.target = self
         menu.addItem(.separator())
         let title = menu.addItem(withTitle: "최근 추가한 파일", action: nil, keyEquivalent: ""); title.isEnabled = false

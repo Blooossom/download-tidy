@@ -51,7 +51,7 @@ struct MainView: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "tray.and.arrow.down.fill").font(.system(size: 21)).foregroundStyle(teal)
-                Text("다운정리").font(.system(size: 21, weight: .bold, design: .rounded))
+                Text("줍줍").font(.system(size: 21, weight: .bold, design: .rounded))
             }.padding(.top, 32).padding(.bottom, 6)
             Text("파일마다, 제자리를.").font(.system(size: 11)).foregroundStyle(muted).padding(.leading, 33)
             Text("내 다운로드").font(.system(size: 10, weight: .semibold)).foregroundStyle(muted).padding(.top, 36).padding(.bottom, 12)
@@ -71,7 +71,7 @@ struct MainView: View {
         }.padding(.horizontal, 16).background(canvas)
     }
     private func sideRow(_ title: String, symbol: String, kind: FileKind?, count: Int) -> some View {
-        Button { model.category = kind; model.selection = [] } label: {
+        Button { model.selectCategory(kind) } label: {
             HStack(spacing: 10) {
                 Image(systemName: symbol).frame(width: 18)
                 Text(title)
@@ -82,7 +82,9 @@ struct MainView: View {
                 .background(model.category == kind ? teal.opacity(0.10) : .clear)
                 .foregroundStyle(model.category == kind ? teal : ink)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-        }.buttonStyle(.plain).padding(.vertical, 1)
+                .contentShape(Rectangle())
+        }.buttonStyle(SidebarButtonStyle()).padding(.vertical, 1)
+            .accessibilityAddTraits(model.category == kind ? .isSelected : [])
     }
     private var header: some View {
         HStack(alignment: .center) {
@@ -110,7 +112,7 @@ struct MainView: View {
                 }
             }.padding(17).frame(maxWidth: .infinity).background(canvas).clipShape(RoundedRectangle(cornerRadius: 13))
             Button {
-                model.query = ""; model.period = 0; model.category = .installer; model.selection = []
+                model.query = ""; model.period = 0; model.selectCategory(.installer); model.selection = []
             } label: {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack { Label("설치 파일 모아보기", systemImage: "shippingbox"); Spacer(); Image(systemName: "arrow.up.right") }.font(.system(size: 11, weight: .medium))
@@ -118,7 +120,7 @@ struct MainView: View {
                 }.padding(17).frame(maxWidth: .infinity, minHeight: 66, alignment: .leading).background(Color(red: 0.98, green: 0.94, blue: 0.86)).clipShape(RoundedRectangle(cornerRadius: 13))
             }.buttonStyle(.plain)
             Button {
-                model.query = ""; model.period = 0; model.category = nil
+                model.query = ""; model.period = 0; model.selectCategory(nil)
                 model.selection = Set(model.ready.map(\.id))
             } label: {
                 VStack(alignment: .leading, spacing: 12) {
@@ -143,7 +145,7 @@ struct MainView: View {
             ForEach(Array(["전체 기간", "오늘", "최근 7일", "30일 이전"].enumerated()), id: \.offset) { index, title in
                 Button { model.period = index } label: {
                     Text(title).font(.system(size: 11, weight: model.period == index ? .semibold : .regular)).padding(.horizontal, 11).padding(.vertical, 7)
-                        .background(model.period == index ? ink : .clear).foregroundStyle(model.period == index ? .white : muted).clipShape(Capsule())
+                        .background(model.period == index ? ink : .clear).foregroundStyle(model.period == index ? .white : muted).clipShape(Capsule()).contentShape(Capsule())
                 }.buttonStyle(.plain)
             }
             Spacer()
@@ -151,24 +153,26 @@ struct MainView: View {
         }.padding(.horizontal, 28).padding(.vertical, 17)
     }
     private var fileList: some View {
-        VStack(spacing: 0) {
+        let visible = model.filtered
+        let selectableIDs = Set(visible.filter(\.canMove).map(\.id))
+        return VStack(spacing: 0) {
             HStack {
                 Button {
-                    let ids = Set(model.filtered.filter(\.canOrganize).map(\.id))
+                    let ids = selectableIDs
                     if !ids.isEmpty && ids.isSubset(of: model.selection) { model.selection.subtract(ids) } else { model.selection.formUnion(ids) }
-                } label: { Image(systemName: !model.filtered.filter(\.canOrganize).isEmpty && Set(model.filtered.filter(\.canOrganize).map(\.id)).isSubset(of: model.selection) ? "checkmark.square.fill" : "square").foregroundStyle(muted) }.buttonStyle(.plain).help("현재 목록의 정리 가능한 파일 선택").disabled(model.working || model.storageError != nil)
-                Text("파일 \(model.filtered.count)").font(.system(size: 11, weight: .medium)).foregroundStyle(muted)
+                } label: { Image(systemName: !selectableIDs.isEmpty && selectableIDs.isSubset(of: model.selection) ? "checkmark.square.fill" : "square").foregroundStyle(muted) }.buttonStyle(.plain).help("현재 목록의 정리 가능한 파일 선택").disabled(model.working || model.storageError != nil)
+                Text("파일 \(visible.count)").font(.system(size: 11, weight: .medium)).foregroundStyle(muted)
                 Spacer()
                 Text("추가일 · 크기").font(.system(size: 10)).foregroundStyle(muted)
             }.padding(.horizontal, 28).padding(.vertical, 11).background(canvas.opacity(0.7))
-            if model.filtered.isEmpty {
+            if visible.isEmpty {
                 emptyState(model.loading ? "파일을 읽고 있어요" : model.query.isEmpty ? "아직 파일이 없어요" : "일치하는 파일이 없어요", detail: model.query.isEmpty ? "다른 분류나 기간도 살펴보세요." : "짧은 단어나 파일 확장자로 다시 찾아보세요.", symbol: "tray")
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(model.filtered) { entry in FileRow(entry: entry, model: model) }
+                        ForEach(visible) { entry in FileRow(entry: entry, model: model) }
                     }
-                }
+                }.id(model.category?.rawValue ?? "all")
             }
         }
     }
@@ -196,7 +200,7 @@ struct MainView: View {
                     Button("Finder에서 보기") { model.reveal(entry) }.buttonStyle(.bordered)
                 }.controlSize(.small)
                 Spacer(minLength: 0)
-                Text(entry.organized ? "종류별 폴더에 정리된 파일이에요." : entry.canOrganize ? "정리하면 ‘\(entry.kind.rawValue)’ 폴더로 이동해요." : "이 파일은 자동 정리 대상이 아니에요.").font(.system(size: 11)).foregroundStyle(muted).lineSpacing(4)
+                Text(entry.organized ? "‘\(entry.url.deletingLastPathComponent().lastPathComponent)’ 폴더에 정리된 파일이에요." : entry.canOrganize ? "종류별 또는 직접 지정한 폴더로 정리할 수 있어요." : entry.canMove ? "직접 지정한 폴더로 정리할 수 있어요." : "이 파일은 자동 정리 대상이 아니에요.").font(.system(size: 11)).foregroundStyle(muted).lineSpacing(4)
             } else {
                 Spacer()
                 VStack(spacing: 14) {
@@ -240,14 +244,22 @@ struct MainView: View {
     }
 }
 
+private struct SidebarButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(configuration.isPressed ? teal.opacity(0.12) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
 private struct FileRow: View {
     let entry: FileEntry
     @ObservedObject var model: AppModel
     var body: some View {
         HStack(spacing: 13) {
             Button { model.toggle(entry) } label: {
-                Image(systemName: model.selection.contains(entry.id) ? "checkmark.square.fill" : "square").foregroundStyle(entry.canOrganize ? teal : muted.opacity(0.25))
-            }.buttonStyle(.plain).disabled(!entry.canOrganize || model.working || model.storageError != nil).accessibilityLabel("\(entry.name) 정리 선택")
+                Image(systemName: model.selection.contains(entry.id) ? "checkmark.square.fill" : "square").foregroundStyle(entry.canMove ? teal : muted.opacity(0.25))
+            }.buttonStyle(.plain).disabled(!entry.canMove || model.working || model.storageError != nil).accessibilityLabel("\(entry.name) 정리 선택")
             Image(systemName: entry.kind.symbol).font(.system(size: 19, weight: .regular)).foregroundStyle(entry.kind == .installer ? Color.orange : teal)
                 .frame(width: 38, height: 40).background(entry.kind == .installer ? Color.orange.opacity(0.08) : teal.opacity(0.06)).clipShape(RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 5) {
@@ -271,7 +283,7 @@ private struct FileRow: View {
             .contextMenu {
                 Button("열기") { model.open(entry) }
                 Button("Finder에서 보기") { model.reveal(entry) }
-                if entry.canOrganize { Button(model.selection.contains(entry.id) ? "정리 선택 해제" : "정리할 파일로 선택") { model.toggle(entry) }.disabled(model.working) }
+                if entry.canMove { Button(model.selection.contains(entry.id) ? "정리 선택 해제" : "정리할 파일로 선택") { model.toggle(entry) }.disabled(model.working) }
             }
             .overlay(alignment: .bottom) { Rectangle().fill(line.opacity(0.6)).frame(height: 1).padding(.leading, 78) }
     }
@@ -299,7 +311,30 @@ struct PlanView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Label("이렇게 정리할게요", systemImage: "tray.and.arrow.down").font(.system(size: 23, weight: .bold)).foregroundStyle(ink)
-            Text("선택한 \(model.plans.count)개 파일을 아래 위치로 옮겨요. 같은 이름의 파일은 덮어쓰지 않아요.").font(.system(size: 12)).foregroundStyle(muted)
+            Text("선택한 \(model.reviewCount)개 파일을 어디에 모을까요?").font(.system(size: 12)).foregroundStyle(muted)
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("정리할 위치", selection: $model.useCustomFolder) {
+                    Text("종류별 폴더").tag(false)
+                    Text("직접 지정한 폴더").tag(true)
+                }.pickerStyle(.segmented).labelsHidden()
+                if model.useCustomFolder {
+                    HStack(spacing: 10) {
+                        Image(systemName: "folder.badge.plus").foregroundStyle(teal)
+                        TextField("새 폴더 이름 · 예: 10월 프로젝트", text: $model.customFolderName)
+                            .textFieldStyle(.roundedBorder).accessibilityLabel("정리할 폴더 이름")
+                        Menu("기존 폴더 선택") {
+                            ForEach(model.existingFolderNames, id: \.self) { name in
+                                Button(name) { model.customFolderName = name }
+                            }
+                        }.disabled(model.existingFolderNames.isEmpty).fixedSize()
+                    }
+                }
+                if let error = model.planError {
+                    Label(error, systemImage: "exclamationmark.circle").font(.system(size: 11)).foregroundStyle(.orange)
+                } else {
+                    Text(model.destinationDescription).font(.system(size: 11)).foregroundStyle(teal).textSelection(.enabled)
+                }
+            }.padding(14).background(canvas).clipShape(RoundedRectangle(cornerRadius: 10))
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(model.plans) { plan in
@@ -311,14 +346,16 @@ struct PlanView: View {
                         Divider()
                     }
                 }
-            }.frame(minHeight: 200, maxHeight: 350)
+            }.frame(height: 240)
             Text("이동 전 파일 상태를 다시 확인해요. 정리 기록은 앱을 껐다 켜도 남으며, 변경되지 않은 파일은 되돌릴 수 있어요.").font(.system(size: 11)).foregroundStyle(muted)
             HStack {
                 Button("취소") { model.showPlan = false }.keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("\(model.plans.count)개 파일 이동") { model.organize() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                Button("\(model.reviewCount)개 파일 이동") { model.organize() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(model.planError != nil || model.plans.isEmpty)
             }
         }.padding(28).frame(width: 650).tint(teal).preferredColorScheme(.light)
+            .onChange(of: model.useCustomFolder) { _ in model.updatePlan() }
+            .onChange(of: model.customFolderName) { _ in model.updatePlan() }
     }
 }
 

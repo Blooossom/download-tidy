@@ -70,11 +70,12 @@ public struct FileEntry: Identifiable, Sendable {
     public let organized: Bool
     public let exclusion: String?
     public var name: String { url.lastPathComponent }
-    public var canOrganize: Bool { kind.canOrganize && !organized && exclusion == nil && fingerprint != nil }
+    public var canMove: Bool { kind != .folder && !organized && exclusion == nil && fingerprint != nil }
+    public var canOrganize: Bool { kind.canOrganize && canMove }
 }
 
 public enum Catalog {
-    public static func scan(_ root: URL) throws -> [FileEntry] {
+    public static func scan(_ root: URL, organizedFolders: Set<String> = []) throws -> [FileEntry] {
         let fm = FileManager.default
         let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .isAliasFileKey, .isPackageKey, .fileSizeKey, .addedToDirectoryDateKey, .creationDateKey, .contentModificationDateKey]
         let children = try fm.contentsOfDirectory(at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
@@ -95,9 +96,9 @@ public enum Catalog {
         }
         for url in children {
             append(url, organized: false)
-            if FileKind.allCases.contains(where: { $0.canOrganize && $0.rawValue == url.lastPathComponent }),
+            if (organizedFolders.contains(url.lastPathComponent) || FileKind.allCases.contains(where: { $0.canOrganize && $0.rawValue == url.lastPathComponent })),
                let values = try? url.resourceValues(forKeys: Set(keys)), values.isDirectory == true,
-               values.isSymbolicLink != true, values.isAliasFile != true,
+               values.isSymbolicLink != true, values.isAliasFile != true, values.isPackage != true,
                let nested = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) {
                 for item in nested { append(item, organized: true) }
             }

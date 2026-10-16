@@ -20,6 +20,11 @@ final class AppModel: ObservableObject {
     @Published var canCancel = false
     @Published var history: [MoveBatch] = []
     @Published var plans: [MovePlan] = []
+    @Published var useCustomFolder = false
+    @Published var customFolderName = ""
+    @Published var planError: String?
+    @Published var destinationDescription = ""
+    @Published var existingFolderNames: [String] = []
     @Published var showPlan = false
     @Published var showHistory = false
     @Published var message: String?
@@ -34,6 +39,7 @@ final class AppModel: ObservableObject {
     private var timer: Timer?
     private let demo: Bool
     private var scanID = UUID()
+    private var planEntries: [FileEntry] = []
     let journalURL: URL
 
     init(root: URL? = nil, storage: URL? = nil) {
@@ -70,21 +76,29 @@ final class AppModel: ObservableObject {
     }
     var focused: FileEntry? { entries.first { $0.id == focusID } }
     var ready: [FileEntry] { entries.filter(\.canOrganize) }
-    var selected: [FileEntry] { entries.filter { selection.contains($0.id) && $0.canOrganize } }
+    var selected: [FileEntry] { entries.filter { selection.contains($0.id) && $0.canMove } }
     var fileCount: Int { entries.filter { $0.kind != .folder }.count }
     var totalSize: Int64 { entries.filter { $0.kind != .folder }.reduce(0) { $0 + $1.size } }
+    var reviewCount: Int { planEntries.count }
+    func selectCategory(_ kind: FileKind?) {
+        guard category != kind else { return }
+        category = kind
+        selection = []
+        if let focused, let kind, focused.kind != kind { focusID = nil }
+    }
     func refresh(quiet: Bool = false) async {
         guard !loading && !working && !needsFolder else { return }
         loading = true
         let request = UUID(); scanID = request
         let target = root
-        let result = await Task.detached { Result { try Catalog.scan(target) } }.value
+        let folders = Organizer.managedFolderNames(in: history, root: target)
+        let result = await Task.detached { Result { try Catalog.scan(target, organizedFolders: folders) } }.value
         guard request == scanID else { return }
         switch result {
         case .success(let items):
             let changed = items.count != entries.count || zip(items, entries).contains { $0.id != $1.id || $0.fingerprint != $1.fingerprint || $0.exclusion != $1.exclusion }
             entries = items; scanError = nil
-            selection.formIntersection(Set(items.filter(\.canOrganize).map(\.id)))
+            selection.formIntersection(Set(items.filter(\.canMove).map(\.id)))
             if let focusID, !items.contains(where: { $0.id == focusID }) { self.focusID = nil }
             if changed || !quiet { search() }
         case .failure(let failure):
@@ -121,11 +135,37 @@ final class AppModel: ObservableObject {
     }
     func previewSelection() {
         guard storageError == nil else { error = storageError; return }
-        plans = Organizer.plans(for: selected, root: root)
-        showPlan = !plans.isEmpty
+        planEntries = selected
+        guard !planEntries.isEmpty else { return }
+        useCustomFolder = planEntries.contains { !$0.kind.canOrganize }; customFolderName = ""
+        existingFolderNames = entries.filter { $0.kind == .folder && !$0.organized }
+            .map(\.name).filter { (try? Organizer.destinationFolder(named: $0, root: root)) != nil }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        updatePlan()
+        showPlan = true
+    }
+    func updatePlan() {
+        planError = nil
+        destinationDescription = ""
+        do {
+            if useCustomFolder {
+                let folder = try Organizer.destinationFolder(named: customFolderName, root: root)
+                plans = try Organizer.plans(for: planEntries, root: root, folderName: customFolderName)
+                destinationDescription = Organizer.exists(folder) ? "기존 폴더에 모아요: \(folder.path)" : "이동할 때 새 폴더를 만들어요: \(folder.path)"
+            } else {
+                guard planEntries.allSatisfy({ $0.kind.canOrganize }) else {
+                    throw TidyError.message("기타 파일이 포함되어 있어요. ‘직접 지정한 폴더’에서 모을 위치를 정해 주세요.")
+                }
+                plans = Organizer.plans(for: planEntries, root: root)
+                destinationDescription = "파일 종류에 따라 문서·이미지·압축파일 등의 폴더로 나눠요."
+            }
+        } catch {
+            plans = []
+            planError = error.localizedDescription
+        }
     }
     func organize() {
-        guard let organizer, !working else { return }
+        guard let organizer, !working, planError == nil, !plans.isEmpty else { return }
         let review = plans
         showPlan = false; working = true; canCancel = true
         operationTask = Task {
